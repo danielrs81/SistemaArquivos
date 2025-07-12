@@ -1,0 +1,15 @@
+# Ignorar arquivos temporários
+__pycache__/
+*.pyc
+
+# Ignorar configurações locais
+config.ini
+
+# Ignorar executáveis
+dist/
+build/
+*.exe
+
+# Ignorar arquivos do editor
+.vscode/
+.idea/
