@@ -315,7 +315,7 @@ class Aplicativo:
                 config.write(f)
             
             messagebox.showinfo("Sucesso", f"Arquivo de clientes definido como:\n{clientes_file}")
-
+            # Verifica se o arquivo de clientes já existe
     def alterar_logo(self):
         arquivo = filedialog.askopenfilename(
             title="Selecionar Logo",
