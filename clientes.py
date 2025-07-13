@@ -1,76 +1,95 @@
+import sqlite3
 import os
-from tkinter import messagebox
-import re
-import configparser
+from threading import Lock
+from configparser import ConfigParser
+import logging
 
-# Carregar configurações
-config = configparser.ConfigParser()
+# Configurar logging
+logging.basicConfig(filename='sistema.log', level=logging.ERROR)
+
+# Obter caminho do banco de dados
+config = ConfigParser()
 config.read('config.ini')
+CLIENTES_DB = config.get('PATHS', 'CLIENTES_FILE')
 
-# Definir caminho do arquivo de clientes
-CLIENTES_FILE = config.get('PATHS', 'CLIENTES_FILE', fallback=os.path.join("clientes.txt"))
+# Garantir que o diretório existe
+os.makedirs(os.path.dirname(CLIENTES_DB), exist_ok=True)
 
-def validar_nome_cliente(nome):
-    """Valida se o nome contém apenas letras, espaços e caracteres básicos"""
-    if not nome.strip():
-        return False, "O nome não pode estar vazio!"
-    if re.search(r'[0-9\\\/:*?"<>|]', nome):
-        return False, "Nome inválido! Não pode conter números ou caracteres especiais."
-    return True, ""
+db_lock = Lock()
+
+def init_db():
+    """Inicializa o banco de dados se não existir"""
+    try:
+        with db_lock:
+            conn = sqlite3.connect(CLIENTES_DB)
+            cursor = conn.cursor()
+            cursor.execute('''CREATE TABLE IF NOT EXISTS clientes (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                nome TEXT UNIQUE
+                            )''')
+            conn.commit()
+    except Exception as e:
+        logging.error(f"Erro ao inicializar banco de dados: {str(e)}")
+        raise
 
 def obter_clientes():
-    """Retorna lista de clientes cadastrados em ordem alfabética"""
+    """Retorna lista de clientes em ordem alfabética"""
     try:
-        # Criar diretório se não existir
-        os.makedirs(os.path.dirname(CLIENTES_FILE), exist_ok=True)
+        init_db()  # Garante que o banco está criado
         
-        # Criar arquivo se não existir
-        if not os.path.exists(CLIENTES_FILE):
-            with open(CLIENTES_FILE, 'w', encoding='utf-8') as f:
-                pass
-        
-        with open(CLIENTES_FILE, "r", encoding='utf-8') as f:
-            clientes = [linha.strip() for linha in f.readlines() if linha.strip()]
-            return sorted(clientes, key=str.lower)
+        with db_lock:
+            conn = sqlite3.connect(CLIENTES_DB)
+            cursor = conn.cursor()
+            cursor.execute("SELECT nome FROM clientes ORDER BY nome")
+            return [row[0] for row in cursor.fetchall()]
     except Exception as e:
-        messagebox.showerror("Erro", f"Falha ao carregar clientes: {str(e)}")
-        return []
+        logging.error(f"Erro ao obter clientes: {str(e)}")
+        return []  # Retorna lista vazia em caso de erro
 
 def adicionar_cliente(novo_cliente):
-    """Adiciona novo cliente (convertido para maiúsculas)"""
-    clientes = obter_clientes()
     novo_cliente = novo_cliente.strip().upper()
     
-    valido, msg = validar_nome_cliente(novo_cliente)
-    if not valido:
-        return False, msg
-        
-    if not novo_cliente:
-        return False, "O nome do cliente não pode estar vazio!"
-    if novo_cliente in clientes:
-        return False, "Este cliente já está cadastrado!"
-    
     try:
-        with open(CLIENTES_FILE, "a", encoding='utf-8') as f:
-            f.write(novo_cliente + "\n")
-        return True, "Cliente cadastrado com sucesso!"
+        init_db()
+        
+        with db_lock:
+            conn = sqlite3.connect(CLIENTES_DB)
+            cursor = conn.cursor()
+            
+            # Verifica se já existe
+            cursor.execute("SELECT id FROM clientes WHERE nome = ?", (novo_cliente,))
+            if cursor.fetchone():
+                return False, "Este cliente já está cadastrado!"
+            
+            # Adiciona novo
+            cursor.execute("INSERT INTO clientes (nome) VALUES (?)", (novo_cliente,))
+            conn.commit()
+            
+            return True, "Cliente cadastrado com sucesso!"
     except Exception as e:
-        return False, f"Erro ao cadastrar cliente: {str(e)}"
+        logging.error(f"Erro ao adicionar cliente: {str(e)}")
+        return False, f"Erro de banco de dados: {str(e)}"
 
 def remover_cliente(nome_cliente):
-    """Remove um cliente existente"""
-    clientes = obter_clientes()
     nome_cliente = nome_cliente.strip().upper()
     
-    if nome_cliente not in clientes:
-        return False, "Cliente não encontrado!"
-    
     try:
-        with open(CLIENTES_FILE, "w", encoding='utf-8') as f:
-            for cliente in clientes:
-                if cliente != nome_cliente:
-                    f.write(cliente + "\n")
+        init_db()
         
-        return True, "Cliente removido com sucesso!"
+        with db_lock:
+            conn = sqlite3.connect(CLIENTES_DB)
+            cursor = conn.cursor()
+            
+            # Verifica se existe
+            cursor.execute("SELECT id FROM clientes WHERE nome = ?", (nome_cliente,))
+            if not cursor.fetchone():
+                return False, "Cliente não encontrado!"
+            
+            # Remove
+            cursor.execute("DELETE FROM clientes WHERE nome = ?", (nome_cliente,))
+            conn.commit()
+            
+            return True, "Cliente removido com sucesso!"
     except Exception as e:
-        return False, f"Erro ao remover cliente: {str(e)}"
+        logging.error(f"Erro ao remover cliente: {str(e)}")
+        return False, f"Erro de banco de dados: {str(e)}"
