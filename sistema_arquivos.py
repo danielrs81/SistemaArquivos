@@ -1,3 +1,4 @@
+import tempfile  # Adicione esta linha com as outras importações
 import os
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
@@ -33,16 +34,19 @@ except ImportError:
 def is_outlook_temp_file(filepath):
     """Identifica arquivos temporários do Outlook com maior precisão"""
     try:
+        if not filepath:  # Se o caminho estiver vazio
+            return False
+            
         filepath = filepath.lower()
-        outlook_temp_signs = [
-            'outlook', 
-            'temp', 
-            'content.outlook',
-            '~$',  # Arquivos temporários do Office
-            '.tmp'  # Extensão temporária
+        outlook_signs = [
+            'content.outlook',  # Pasta típica do Outlook
+            'temp\\',          # Pasta temporária (note a barra invertida)
+            '~$',              # Prefixo de arquivos temporários do Office
+            '.tmp',            # Extensão temporária
+            'outlook_attach_'  # Prefixo comum do Outlook
         ]
-        return any(sign in filepath for sign in outlook_temp_signs)
-    except:
+        return any(sign in filepath.replace('/', '\\') for sign in outlook_signs)
+    except Exception:
         return False
 
 class Aplicativo:
@@ -252,27 +256,33 @@ class Aplicativo:
             self.upload_label.config(text="Clique em 'Adicionar Arquivos' ou 'Adicionar Pasta'")
 
     def processar_arquivos_drop(self, event):
-        """Processa arquivos soltos na área de upload com tratamento robusto"""
+        """Processa arquivos soltos na área de upload"""
         try:
-            # Converte os arquivos dropados em uma lista
+            if not hasattr(event, 'data'):
+                return
+
             files = self.root.tk.splitlist(event.data)
-            
-            # Processa cada arquivo/pasta
             for f in files:
                 try:
-                    if os.path.isdir(f):
-                        # Processa todos os arquivos da pasta
-                        for root, _, files_in_dir in os.walk(f):
-                            for file in files_in_dir:
-                                file_path = os.path.join(root, file)
-                                self._processar_arquivo_individual(file_path)
-                    else:
-                        self._processar_arquivo_individual(f)
+                    f = f.strip()
+                    if not f:
+                        continue
+                        
+                    # Corrige caminhos com espaços
+                    if not os.path.exists(f):
+                        f = f.replace('{', '').replace('}', '')  # Remove chaves que o Outlook pode adicionar
+                    
+                    if os.path.exists(f):
+                        if os.path.isdir(f):
+                            for root, _, files_in_dir in os.walk(f):
+                                for file in files_in_dir:
+                                    self._processar_arquivo_individual(os.path.join(root, file))
+                        else:
+                            self._processar_arquivo_individual(f)
                 except Exception as e:
                     logging.error(f"Erro ao processar {f}: {str(e)}")
                     continue
-            
-            # Atualiza a interface
+
             self.atualizar_lista_arquivos()
             
         except Exception as e:
@@ -282,9 +292,9 @@ class Aplicativo:
     def _processar_arquivo_individual(self, filepath):
         """Processa um único arquivo, com tratamento especial para anexos do Outlook"""
         try:
-            # Normaliza o caminho para garantir consistência
-            filepath = os.path.normpath(filepath)
-            
+            if not filepath or not os.path.exists(filepath):
+                return
+
             # Verifica se é um arquivo temporário do Outlook
             if is_outlook_temp_file(filepath):
                 # Cria uma pasta temporária segura
@@ -293,34 +303,33 @@ class Aplicativo:
                 
                 # Gera um nome único para o arquivo
                 original_name = os.path.basename(filepath)
-                
-                # Remove prefixos do Outlook se existirem
-                clean_name = original_name
-                for prefix in ['outlook_attach_', '~$', 'temp_']:
-                    clean_name = clean_name.replace(prefix, '')
+                clean_name = original_name.replace('~$', '').replace('outlook_attach_', '')
                 
                 # Cria o novo caminho
                 new_path = os.path.join(temp_dir, clean_name)
                 
-                # Copia o arquivo (não move, para evitar problemas com o Outlook)
-                shutil.copy2(filepath, new_path)
+                # Tenta mover o arquivo (melhor que copiar para evitar bloqueios)
+                try:
+                    shutil.move(filepath, new_path)
+                    filepath = new_path  # Atualiza o caminho para o novo local
+                except:
+                    # Se mover falhar, tenta copiar
+                    shutil.copy2(filepath, new_path)
+                    filepath = new_path
                 
-                # Adiciona à lista de upload com a flag de temporário
-                self.arquivos_para_upload.append({
-                    'path': new_path,
-                    'name': clean_name,
-                    'is_temp': True
-                })
+                is_temp = True
             else:
-                # Processamento normal para outros arquivos
-                self.arquivos_para_upload.append({
-                    'path': filepath,
-                    'name': os.path.basename(filepath),
-                    'is_temp': False
-                })
+                is_temp = False
+
+            # Adiciona à lista de upload
+            self.arquivos_para_upload.append({
+                'path': filepath,
+                'name': os.path.basename(filepath),
+                'is_temp': is_temp
+            })
+
         except Exception as e:
             logging.error(f"Erro ao processar arquivo {filepath}: {str(e)}")
-            messagebox.showerror("Erro", f"Não foi possível processar o arquivo: {str(e)}")
 
 
     def carregar_logo(self):
