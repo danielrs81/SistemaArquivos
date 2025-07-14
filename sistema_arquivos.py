@@ -5,9 +5,17 @@ from tkinter import font as tkfont
 from PIL import Image, ImageTk
 import shutil
 import configparser
+import tempfile
+import logging
 from logica import obter_info_processos, criar_pasta, copiar_arquivos, abrir_pasta_processo
 from clientes import obter_clientes, adicionar_cliente, remover_cliente
 from busca import TelaBusca
+
+def validar_arquivo(filepath):
+    """Valida se o arquivo possui uma extensão permitida (exemplo: .pdf, .docx, .xlsx, .jpg, .png)"""
+    extensoes_permitidas = ['.pdf', '.docx', '.xlsx', '.jpg', '.jpeg', '.png']
+    _, ext = os.path.splitext(filepath)
+    return ext.lower() in extensoes_permitidas
 
 # Configurações iniciais
 config = configparser.ConfigParser()
@@ -227,16 +235,51 @@ class Aplicativo:
             files = self.root.tk.splitlist(event.data)
             for f in files:
                 if os.path.isdir(f):
+                    # Processar pasta (código existente)
                     for root, _, files in os.walk(f):
                         for file in files:
                             path = os.path.join(root, file)
-                            rel_path = os.path.relpath(path, f)
-                            self.arquivos_para_upload.append({'path': path, 'name': rel_path})
+                            self._processar_arquivo_individual(path)
                 else:
-                    self.arquivos_para_upload.append({'path': f, 'name': os.path.basename(f)})
+                    self._processar_arquivo_individual(f)
             self.atualizar_lista_arquivos()
         except Exception as e:
             messagebox.showerror("Erro", f"Falha ao processar arquivos: {str(e)}")
+
+        def _processar_arquivo_individual(self, filepath):
+            """Processa um único arquivo, tratando anexos do Outlook"""
+            if self.is_outlook_temp_file(filepath):
+                # Copia o arquivo temporário para uma pasta segura antes de processar
+                temp_dir = os.path.join(tempfile.gettempdir(), 'outlook_attachments')
+                os.makedirs(temp_dir, exist_ok=True)
+                
+                novo_nome = os.path.basename(filepath).replace('outlook_attach_', '')
+                novo_caminho = os.path.join(temp_dir, novo_nome)
+                
+                # Move o arquivo em vez de copiar (evita bloqueio do Outlook)
+                shutil.move(filepath, novo_caminho)
+                
+                self.arquivos_para_upload.append({
+                    'path': novo_caminho,
+                    'name': novo_nome,
+                    'is_temp': True  # Marcar como temporário para limpeza posterior
+                })
+            else:
+                # Processamento normal para outros arquivos
+                self.arquivos_para_upload.append({
+                    'path': filepath,
+                    'name': os.path.basename(filepath),
+                    'is_temp': False
+                })
+
+    def is_outlook_temp_file(self, filepath):
+        """Verifica se o arquivo é um anexo temporário do Outlook"""
+        temp_dir = os.environ.get('TEMP', '')
+        filename = os.path.basename(filepath)
+        return (
+            temp_dir.lower() in filepath.lower()
+            and filename.lower().startswith('outlook')
+        )
 
     def carregar_logo(self):
         try:
@@ -492,6 +535,47 @@ class Aplicativo:
             messagebox.showinfo("Sucesso", f"{len(self.arquivos_para_upload)} arquivo(s) copiado(s) com sucesso!")
             self.arquivos_para_upload = []
             self.atualizar_lista_arquivos()
+            
+        for arquivo in self.arquivos_para_upload:
+            try:
+                destino = os.path.join(pasta_destino, arquivo['name'])
+                
+                # Se for arquivo temporário, já foi movido - apenas copiar
+                if arquivo.get('is_temp'):
+                    shutil.copy2(arquivo['path'], destino)
+                else:
+                    # Processamento normal para outros arquivos
+                    if not validar_arquivo(arquivo['path']):
+                        raise ValueError(f"Tipo de arquivo não permitido: {os.path.splitext(arquivo['path'])[1]}")
+                    
+                    if os.path.exists(destino):
+                        resposta = messagebox.askyesno("Arquivo Existente", f"Substituir {arquivo['name']}?")
+                        if not resposta:
+                            continue
+                    
+                    shutil.copy2(arquivo['path'], destino)
+            
+            except Exception as e:
+                messagebox.showerror("Erro", f"Falha ao copiar {arquivo['name']}: {str(e)}")
+        
+        # Limpar arquivos temporários após o upload
+        self._limpar_arquivos_temporarios()
+    
+    # ... resto do código ...
+
+    def _limpar_arquivos_temporarios(self):
+        """Remove arquivos temporários marcados para exclusão"""
+        temp_files = [f for f in self.arquivos_para_upload if f.get('is_temp')]
+        
+        for arquivo in temp_files:
+            try:
+                if os.path.exists(arquivo['path']):
+                    os.remove(arquivo['path'])
+            except Exception as e:
+                logging.error(f"Falha ao remover arquivo temporário {arquivo['path']}: {str(e)}")
+        
+        # Remover apenas os temporários da lista
+        self.arquivos_para_upload = [f for f in self.arquivos_para_upload if not f.get('is_temp')]
 
 if __name__ == "__main__":
     # Configuração para Windows (DPI)
