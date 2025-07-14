@@ -1,14 +1,31 @@
-import tempfile  # Adicione esta linha com as outras importações
 import os
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from tkinter import font as tkfont
 from PIL import Image, ImageTk
 import shutil
+import tempfile
 import configparser
 import logging
-from tkinterdnd2 import DND_FILES
+import sys
 from logica import obter_info_processos, criar_pasta, copiar_arquivos, abrir_pasta_processo
+from clientes import obter_clientes, adicionar_cliente, remover_cliente
+from busca import TelaBusca
+
+# Configuração de logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    filename='sistema_arquivos.log'
+)
+
+# Configuração inicial
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+    HAS_DND = True
+except ImportError:
+    HAS_DND = False
+    logging.warning("tkinterdnd2 não instalado. Drag-and-drop não estará disponível.")
 
 def validar_arquivo(filepath):
     """Valida se o arquivo possui uma extensão permitida."""
@@ -16,58 +33,71 @@ def validar_arquivo(filepath):
     _, ext = os.path.splitext(filepath)
     return ext.lower() in extensoes_permitidas
 
-from clientes import obter_clientes, adicionar_cliente, remover_cliente
-from busca import TelaBusca
-
-# Configurações iniciais
-config = configparser.ConfigParser()
-config.read('config.ini')
-
-# ===== CONFIGURAÇÃO DO DRAG-AND-DROP =====
-try:
-    from tkinterdnd2 import TkinterDnD, DND_FILES
-    HAS_DND = True
-except ImportError:
-    HAS_DND = False
-    print("Aviso: tkinterdnd2 não instalado. Drag-and-drop não estará disponível.")
-
 def is_outlook_temp_file(filepath):
     """Identifica arquivos temporários do Outlook com maior precisão"""
     try:
         if not filepath:  # Se o caminho estiver vazio
             return False
             
-        filepath = filepath.lower()
+        filepath = filepath.lower().replace('/', '\\')
         outlook_signs = [
             'content.outlook',  # Pasta típica do Outlook
-            'temp\\',          # Pasta temporária (note a barra invertida)
+            '\\temp\\',        # Pasta temporária
             '~$',              # Prefixo de arquivos temporários do Office
             '.tmp',            # Extensão temporária
             'outlook_attach_'  # Prefixo comum do Outlook
         ]
-        return any(sign in filepath.replace('/', '\\') for sign in outlook_signs)
+        return any(sign in filepath for sign in outlook_signs)
     except Exception:
         return False
+
+class OutlookIntegration:
+    """Classe para integração com o Microsoft Outlook"""
+    def __init__(self, callback):
+        self.callback = callback
+        self._setup_clipboard_monitoring()
+
+    def _setup_clipboard_monitoring(self):
+        """Configura monitoramento da área de transferência como fallback"""
+        try:
+            import win32clipboard
+            from win32con import WM_DRAWCLIPBOARD
+            self.clipboard_viewer = None
+            self._clipboard_format = None
+            
+            # Tenta registrar um formato personalizado para o Outlook
+            try:
+                self._clipboard_format = win32clipboard.RegisterClipboardFormat("OutlookAttachments")
+            except:
+                pass
+            
+            logging.info("Monitoramento de área de transferência ativado")
+        except ImportError:
+            logging.warning("pywin32 não instalado. Monitoramento de área de transferência desativado")
+
+    def check_clipboard(self):
+        """Verifica a área de transferência por arquivos do Outlook"""
+        try:
+            import win32clipboard
+            win32clipboard.OpenClipboard()
+            
+            # Verifica se há arquivos na área de transferência
+            if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_HDROP):
+                files = win32clipboard.GetClipboardData(win32clipboard.CF_HDROP)
+                if files:
+                    self.callback(files)
+            
+            win32clipboard.CloseClipboard()
+        except Exception as e:
+            logging.error(f"Erro ao verificar área de transferência: {e}")
 
 class Aplicativo:
     def __init__(self, root):
         self.root = root
         self.root.title("Sistema de Arquivos Digitais")
-        self.root.geometry("900x850") #tamanho da tela principal
-        self.root.configure(bg='#f0f0f0') # configuração da cor principal
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close) # Configuração do evento de fechamento da janela
-
-        # Configuração de estilo
-        self.style = ttk.Style()
-        self.style.configure('TFrame', background='#f0f0f0')
-        self.style.configure('TLabel', background='#f0f0f0', font=('Arial', 10))
-        self.style.configure('TButton', font=('Arial', 10), padding=5)
-        self.style.configure('Title.TLabel', font=('Arial', 12, 'bold'))
-        self.style.configure('Highlight.TFrame', background='#e0e0ff')
-        self.style.configure('Accent.TButton', foreground='black', background='#4CAF50')
-        self.style.map('Accent.TButton', 
-                    background=[('active', '#45a049'), ('disabled', '#cccccc')])
-
+        self.root.geometry("900x850")
+        self.root.configure(bg='#f0f0f0')
+        
         # Variáveis de controle
         self.cliente_var = tk.StringVar()
         self.area_var = tk.StringVar()
@@ -77,11 +107,29 @@ class Aplicativo:
         self.bg_photo = None
         self.bg_label = None
 
+        # Configurações de estilo
+        self._configure_styles()
+        
         # Inicialização dos componentes
         self.criar_interface()
         self.configurar_drag_drop()
         self.configurar_validacoes()
+        
+        # Configura o evento de fechamento da janela
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
+    def _configure_styles(self):
+        """Configura os estilos visuais da interface"""
+        self.style = ttk.Style()
+        self.style.configure('TFrame', background='#f0f0f0')
+        self.style.configure('TLabel', background='#f0f0f0', font=('Arial', 10))
+        self.style.configure('TButton', font=('Arial', 10), padding=5)
+        self.style.configure('Title.TLabel', font=('Arial', 12, 'bold'))
+        self.style.configure('Highlight.TFrame', background='#e0e0ff')
+        self.style.configure('Accent.TButton', foreground='black', background='#4CAF50')
+        self.style.map('Accent.TButton', 
+                     background=[('active', '#45a049'), ('disabled', '#cccccc')])
+        
     def on_close(self):
         """Executa ao fechar a janela"""
         self._limpar_arquivos_temporarios()
@@ -90,8 +138,6 @@ class Aplicativo:
     def criar_interface(self):
         """Cria todos os widgets da interface"""
         self.criar_menu()
-
-        # Carrega o logo no topo
         self.carregar_logo()
         
         # Frame principal
@@ -153,7 +199,7 @@ class Aplicativo:
         
         self.upload_label = ttk.Label(
             self.upload_frame, 
-            text="Arraste e solte arquivos aqui ou clique nos botões abaixo",
+            text="Arraste e solte arquivos aqui (incluindo do Outlook) ou clique nos botões abaixo",
             font=('Arial', 10, 'italic')
         )
         self.upload_label.pack(pady=20)
@@ -172,6 +218,13 @@ class Aplicativo:
             frame_botoes, 
             text="Adicionar Pasta", 
             command=self.selecionar_pasta
+        ).pack(side="left", padx=5)
+        
+        ttk.Button(
+            frame_botoes, 
+            text="Importar do Outlook", 
+            command=self.importar_do_outlook,
+            style='Accent.TButton'
         ).pack(side="left", padx=5)
         
         ttk.Button(
@@ -245,18 +298,18 @@ class Aplicativo:
         return True
 
     def configurar_drag_drop(self):
-        """Configura o drag-and-drop de acordo com a disponibilidade"""
+        """Configura o drag-and-drop com tratamento especial para Outlook"""
         if HAS_DND:
             self.upload_frame.drop_target_register(DND_FILES)
-            self.upload_frame.dnd_bind('<<Drop>>', self.processar_arquivos_drop)
+            self.upload_frame.dnd_bind('<<Drop>>', self._handle_complex_drop)
             self.upload_frame.bind('<Enter>', lambda e: self.upload_frame.config(style='Highlight.TFrame'))
             self.upload_frame.bind('<Leave>', lambda e: self.upload_frame.config(style='TFrame'))
-            self.upload_label.config(text="Arraste e solte arquivos aqui ou clique nos botões abaixo")
+            self.upload_label.config(text="Arraste e solte arquivos aqui (incluindo do Outlook)")
         else:
             self.upload_label.config(text="Clique em 'Adicionar Arquivos' ou 'Adicionar Pasta'")
 
-    def processar_arquivos_drop(self, event):
-        """Processa arquivos soltos na área de upload"""
+    def _handle_complex_drop(self, event):
+        """Processa eventos de drop com tratamento especial para Outlook"""
         try:
             if not hasattr(event, 'data'):
                 return
@@ -289,37 +342,69 @@ class Aplicativo:
             logging.error(f"Erro no drag-and-drop: {str(e)}")
             messagebox.showerror("Erro", f"Falha ao processar arquivos arrastados: {str(e)}")
 
+    def _handle_outlook_files(self, files):
+        """Processa arquivos recebidos do Outlook"""
+        for f in files:
+            self._processar_arquivo_individual(f)
+        self.atualizar_lista_arquivos()
+
+    def importar_do_outlook(self):
+        """Alternativa para quando o drag-and-drop não funciona"""
+        try:
+            from win32com.client import Dispatch
+            outlook = Dispatch("Outlook.Application")
+            namespace = outlook.GetNamespace("MAPI")
+            
+            # Seleciona a caixa de entrada
+            inbox = namespace.GetDefaultFolder(6)
+            
+            # Mostra diálogo para selecionar mensagem
+            selected_item = outlook.Session.PickFolder()
+            
+            if selected_item:
+                messagebox.showinfo("Outlook", f"Processando e-mails de: {selected_item.Name}")
+                
+                # Processa os anexos de cada mensagem
+                for message in selected_item.Items:
+                    for attachment in message.Attachments:
+                        temp_path = os.path.join(tempfile.gettempdir(), attachment.FileName)
+                        attachment.SaveAsFile(temp_path)
+                        self._processar_arquivo_individual(temp_path)
+                
+                self.atualizar_lista_arquivos()
+                
+        except Exception as e:
+            messagebox.showerror("Erro Outlook", f"Não foi possível acessar o Outlook: {e}")
+            logging.error(f"Erro no Outlook: {e}")
+
     def _processar_arquivo_individual(self, filepath):
-        """Processa um único arquivo, com tratamento especial para anexos do Outlook"""
+        """Processa um único arquivo com tratamento especial para Outlook"""
         try:
             if not filepath or not os.path.exists(filepath):
                 return
 
-            # Verifica se é um arquivo temporário do Outlook
+            is_temp = False
+            
             if is_outlook_temp_file(filepath):
-                # Cria uma pasta temporária segura
+                # Cria diretório temporário seguro
                 temp_dir = os.path.join(tempfile.gettempdir(), 'outlook_attachments')
                 os.makedirs(temp_dir, exist_ok=True)
                 
-                # Gera um nome único para o arquivo
+                # Gera nome limpo para o arquivo
                 original_name = os.path.basename(filepath)
                 clean_name = original_name.replace('~$', '').replace('outlook_attach_', '')
-                
-                # Cria o novo caminho
                 new_path = os.path.join(temp_dir, clean_name)
                 
-                # Tenta mover o arquivo (melhor que copiar para evitar bloqueios)
+                # Tenta mover o arquivo (evita bloqueios)
                 try:
                     shutil.move(filepath, new_path)
-                    filepath = new_path  # Atualiza o caminho para o novo local
-                except:
-                    # Se mover falhar, tenta copiar
+                    filepath = new_path
+                    is_temp = True
+                except Exception as move_error:
+                    logging.warning(f"Falha ao mover, tentando copiar: {move_error}")
                     shutil.copy2(filepath, new_path)
                     filepath = new_path
-                
-                is_temp = True
-            else:
-                is_temp = False
+                    is_temp = True
 
             # Adiciona à lista de upload
             self.arquivos_para_upload.append({
@@ -329,8 +414,7 @@ class Aplicativo:
             })
 
         except Exception as e:
-            logging.error(f"Erro ao processar arquivo {filepath}: {str(e)}")
-
+            logging.error(f"Erro ao processar arquivo {filepath}: {e}")
 
     def carregar_logo(self):
         try:
@@ -342,7 +426,7 @@ class Aplicativo:
                 self.logo = self.logo.resize((200, 60), Image.Resampling.LANCZOS)
                 self.logo_img = ImageTk.PhotoImage(self.logo)
                 self.logo_label = ttk.Label(self.root, image=self.logo_img)
-                self.logo_label.pack(pady=(10, 20))  # Aumentei o padding inferior para 20
+                self.logo_label.pack(pady=(10, 20))
         except Exception as e:
             print(f"Erro ao carregar logo: {str(e)}")
 
@@ -619,7 +703,7 @@ class Aplicativo:
             except Exception as e:
                 logging.error(f"Falha ao remover arquivo temporário {arquivo['path']}: {str(e)}")
         
-        # Remover apenas os temporários da list
+        # Remover apenas os temporários da lista
         self.arquivos_para_upload = [f for f in self.arquivos_para_upload if not f.get('is_temp')]
 
 if __name__ == "__main__":
