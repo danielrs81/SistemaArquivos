@@ -5,17 +5,18 @@ from tkinter import font as tkfont
 from PIL import Image, ImageTk
 import shutil
 import configparser
-import tempfile
 import logging
+from tkinterdnd2 import DND_FILES
 from logica import obter_info_processos, criar_pasta, copiar_arquivos, abrir_pasta_processo
-from clientes import obter_clientes, adicionar_cliente, remover_cliente
-from busca import TelaBusca
 
 def validar_arquivo(filepath):
-    """Valida se o arquivo possui uma extensão permitida (exemplo: .pdf, .docx, .xlsx, .jpg, .png)"""
-    extensoes_permitidas = ['.pdf', '.docx', '.xlsx', '.jpg', '.jpeg', '.png']
+    """Valida se o arquivo possui uma extensão permitida."""
+    extensoes_permitidas = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.jpg', '.jpeg', '.png', '.txt']
     _, ext = os.path.splitext(filepath)
     return ext.lower() in extensoes_permitidas
+
+from clientes import obter_clientes, adicionar_cliente, remover_cliente
+from busca import TelaBusca
 
 # Configurações iniciais
 config = configparser.ConfigParser()
@@ -29,12 +30,28 @@ except ImportError:
     HAS_DND = False
     print("Aviso: tkinterdnd2 não instalado. Drag-and-drop não estará disponível.")
 
+def is_outlook_temp_file(filepath):
+    """Identifica arquivos temporários do Outlook com maior precisão"""
+    try:
+        filepath = filepath.lower()
+        outlook_temp_signs = [
+            'outlook', 
+            'temp', 
+            'content.outlook',
+            '~$',  # Arquivos temporários do Office
+            '.tmp'  # Extensão temporária
+        ]
+        return any(sign in filepath for sign in outlook_temp_signs)
+    except:
+        return False
+
 class Aplicativo:
     def __init__(self, root):
         self.root = root
         self.root.title("Sistema de Arquivos Digitais")
         self.root.geometry("900x850") #tamanho da tela principal
         self.root.configure(bg='#f0f0f0') # configuração da cor principal
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close) # Configuração do evento de fechamento da janela
 
         # Configuração de estilo
         self.style = ttk.Style()
@@ -61,11 +78,16 @@ class Aplicativo:
         self.configurar_drag_drop()
         self.configurar_validacoes()
 
+    def on_close(self):
+        """Executa ao fechar a janela"""
+        self._limpar_arquivos_temporarios()
+        self.root.destroy()
+
     def criar_interface(self):
         """Cria todos os widgets da interface"""
         self.criar_menu()
 
-            # Carrega o logo no topo (adicionado esta linha)
+        # Carrega o logo no topo
         self.carregar_logo()
         
         # Frame principal
@@ -230,39 +252,64 @@ class Aplicativo:
             self.upload_label.config(text="Clique em 'Adicionar Arquivos' ou 'Adicionar Pasta'")
 
     def processar_arquivos_drop(self, event):
-        """Processa arquivos soltos na área de upload"""
+        """Processa arquivos soltos na área de upload com tratamento robusto"""
         try:
+            # Converte os arquivos dropados em uma lista
             files = self.root.tk.splitlist(event.data)
+            
+            # Processa cada arquivo/pasta
             for f in files:
-                if os.path.isdir(f):
-                    # Processar pasta (código existente)
-                    for root, _, files in os.walk(f):
-                        for file in files:
-                            path = os.path.join(root, file)
-                            self._processar_arquivo_individual(path)
-                else:
-                    self._processar_arquivo_individual(f)
+                try:
+                    if os.path.isdir(f):
+                        # Processa todos os arquivos da pasta
+                        for root, _, files_in_dir in os.walk(f):
+                            for file in files_in_dir:
+                                file_path = os.path.join(root, file)
+                                self._processar_arquivo_individual(file_path)
+                    else:
+                        self._processar_arquivo_individual(f)
+                except Exception as e:
+                    logging.error(f"Erro ao processar {f}: {str(e)}")
+                    continue
+            
+            # Atualiza a interface
             self.atualizar_lista_arquivos()
+            
         except Exception as e:
-            messagebox.showerror("Erro", f"Falha ao processar arquivos: {str(e)}")
+            logging.error(f"Erro no drag-and-drop: {str(e)}")
+            messagebox.showerror("Erro", f"Falha ao processar arquivos arrastados: {str(e)}")
 
-        def _processar_arquivo_individual(self, filepath):
-            """Processa um único arquivo, tratando anexos do Outlook"""
-            if self.is_outlook_temp_file(filepath):
-                # Copia o arquivo temporário para uma pasta segura antes de processar
+    def _processar_arquivo_individual(self, filepath):
+        """Processa um único arquivo, com tratamento especial para anexos do Outlook"""
+        try:
+            # Normaliza o caminho para garantir consistência
+            filepath = os.path.normpath(filepath)
+            
+            # Verifica se é um arquivo temporário do Outlook
+            if is_outlook_temp_file(filepath):
+                # Cria uma pasta temporária segura
                 temp_dir = os.path.join(tempfile.gettempdir(), 'outlook_attachments')
                 os.makedirs(temp_dir, exist_ok=True)
                 
-                novo_nome = os.path.basename(filepath).replace('outlook_attach_', '')
-                novo_caminho = os.path.join(temp_dir, novo_nome)
+                # Gera um nome único para o arquivo
+                original_name = os.path.basename(filepath)
                 
-                # Move o arquivo em vez de copiar (evita bloqueio do Outlook)
-                shutil.move(filepath, novo_caminho)
+                # Remove prefixos do Outlook se existirem
+                clean_name = original_name
+                for prefix in ['outlook_attach_', '~$', 'temp_']:
+                    clean_name = clean_name.replace(prefix, '')
                 
+                # Cria o novo caminho
+                new_path = os.path.join(temp_dir, clean_name)
+                
+                # Copia o arquivo (não move, para evitar problemas com o Outlook)
+                shutil.copy2(filepath, new_path)
+                
+                # Adiciona à lista de upload com a flag de temporário
                 self.arquivos_para_upload.append({
-                    'path': novo_caminho,
-                    'name': novo_nome,
-                    'is_temp': True  # Marcar como temporário para limpeza posterior
+                    'path': new_path,
+                    'name': clean_name,
+                    'is_temp': True
                 })
             else:
                 # Processamento normal para outros arquivos
@@ -271,15 +318,10 @@ class Aplicativo:
                     'name': os.path.basename(filepath),
                     'is_temp': False
                 })
+        except Exception as e:
+            logging.error(f"Erro ao processar arquivo {filepath}: {str(e)}")
+            messagebox.showerror("Erro", f"Não foi possível processar o arquivo: {str(e)}")
 
-    def is_outlook_temp_file(self, filepath):
-        """Verifica se o arquivo é um anexo temporário do Outlook"""
-        temp_dir = os.environ.get('TEMP', '')
-        filename = os.path.basename(filepath)
-        return (
-            temp_dir.lower() in filepath.lower()
-            and filename.lower().startswith('outlook')
-        )
 
     def carregar_logo(self):
         try:
@@ -292,7 +334,6 @@ class Aplicativo:
                 self.logo_img = ImageTk.PhotoImage(self.logo)
                 self.logo_label = ttk.Label(self.root, image=self.logo_img)
                 self.logo_label.pack(pady=(10, 20))  # Aumentei o padding inferior para 20
-                # self.logo_label.pack(pady=(10, 20),anchor='nw', padx=10)  # com o logo do lado esquerdo
         except Exception as e:
             print(f"Erro ao carregar logo: {str(e)}")
 
@@ -358,7 +399,7 @@ class Aplicativo:
                 config.write(f)
             
             messagebox.showinfo("Sucesso", f"Arquivo de clientes definido como:\n{clientes_file}")
-            # Verifica se o arquivo de clientes já existe
+
     def alterar_logo(self):
         arquivo = filedialog.askopenfilename(
             title="Selecionar Logo",
@@ -557,12 +598,7 @@ class Aplicativo:
             
             except Exception as e:
                 messagebox.showerror("Erro", f"Falha ao copiar {arquivo['name']}: {str(e)}")
-        
-        # Limpar arquivos temporários após o upload
-        self._limpar_arquivos_temporarios()
     
-    # ... resto do código ...
-
     def _limpar_arquivos_temporarios(self):
         """Remove arquivos temporários marcados para exclusão"""
         temp_files = [f for f in self.arquivos_para_upload if f.get('is_temp')]
