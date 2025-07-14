@@ -619,7 +619,7 @@ class Aplicativo:
             except Exception as e:
                 logging.error(f"Falha ao remover arquivo temporário {arquivo['path']}: {str(e)}")
         
-        # Remover apenas os temporários da lista
+        # Remover apenas os temporários da list
         self.arquivos_para_upload = [f for f in self.arquivos_para_upload if not f.get('is_temp')]
 
 if __name__ == "__main__":
